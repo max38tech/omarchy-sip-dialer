@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local SIP credentials & accounts
+sip.json
+sip_recents.json
+.baresip/
+*.accounts
+*.accounts.local
+
+# Backups & temp files
+*.tmp
+*.bak
+*.swp
+*~
+.DS_Store

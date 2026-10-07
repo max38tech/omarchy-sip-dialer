@@ -1,0 +1,3 @@
+# Baresip accounts configuration for Omarchy
+# Format: <sip:USER@SERVER;transport=TRANSPORT>;auth_user=USER;auth_pass=PASSWORD;regint=REGINT;medianat=stun;stunserver="stun:STUN_SERVER";natpinhole=yes;dtmfmode=rtpevent
+<sip:{{USERNAME}}@{{SERVER}}:{{PORT}};transport={{TRANSPORT}}>;auth_user={{USERNAME}};auth_pass={{PASSWORD}};regint={{REGINT}};medianat={{MEDIANAT}};stunserver="stun:{{STUN_SERVER}}";natpinhole={{NATPINHOLE}};dtmfmode=rtpevent

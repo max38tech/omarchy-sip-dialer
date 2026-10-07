@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+"""
+Omarchy SIP Dialer & Control Bridge
+Manages the Baresip SIP engine, initiates/terminates calls, handles DTMF,
+bridges Quickshell and desktop notifications, and manages audio devices.
+"""
+
+import sys
+import os
+import json
+import socket
+import time
+import subprocess
+import argparse
+import getpass
+
+CONFIG_PATH = os.path.expanduser("~/.config/omarchy/sip.json")
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 4444
+
+
+def load_sip_config():
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {
+        "extension": "",
+        "username": "",
+        "server": "",
+        "port": 5060,
+        "transport": "udp",
+        "audio_input": "",
+        "audio_output": "",
+    }
+
+
+def save_sip_config(cfg):
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception as e:
+        print(f"Error saving sip config: {e}", file=sys.stderr)
+
+
+def encode_netstring(payload: str) -> bytes:
+    b = payload.encode("utf-8")
+    return f"{len(b)}:".encode("utf-8") + b + b","
+
+
+def decode_netstring(data: bytes):
+    messages = []
+    idx = 0
+    while idx < len(data):
+        colon = data.find(b":", idx)
+        if colon == -1:
+            break
+        try:
+            length = int(data[idx:colon].decode("utf-8"))
+        except ValueError:
+            break
+        start = colon + 1
+        end = start + length
+        if end >= len(data):
+            break
+        if data[end:end+1] != b",":
+            break
+        payload = data[start:end].decode("utf-8", errors="replace")
+        messages.append(payload)
+        idx = end + 1
+    return messages, data[idx:]
+
+
+class BaresipClient:
+    def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT, timeout=2.5):
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+
+    def send_command(self, cmd: str, params=None):
+        payload_obj = {"command": cmd}
+        if params is not None:
+            payload_obj["params"] = str(params)
+        payload_str = json.dumps(payload_obj)
+        req = encode_netstring(payload_str)
+
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(self.timeout)
+                s.connect((self.host, self.port))
+                s.sendall(req)
+
+                buffer = b""
+                deadline = time.time() + self.timeout
+                while time.time() < deadline:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    msgs, _ = decode_netstring(buffer)
+                    for m in msgs:
+                        try:
+                            obj = json.loads(m)
+                            if obj.get("response") is True or "ok" in obj:
+                                return obj
+                        except json.JSONDecodeError:
+                            continue
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": "Timeout waiting for response"}
+
+
+def is_service_running() -> bool:
+    try:
+        res = subprocess.run(
+            ["systemctl", "--user", "is-active", "baresip.service"],
+            capture_output=True,
+            text=True,
+        )
+        return res.stdout.strip() == "active"
+    except Exception:
+        return False
+
+
+def get_dialer_plugin_id() -> str:
+    plugins_dir = os.path.expanduser("~/.config/omarchy/plugins")
+    if os.path.isdir(plugins_dir):
+        for entry in os.listdir(plugins_dir):
+            if "dialer" in entry:
+                manifest_file = os.path.join(plugins_dir, entry, "manifest.json")
+                if os.path.isfile(manifest_file):
+                    try:
+                        with open(manifest_file, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                            if "id" in data:
+                                return data["id"]
+                    except Exception:
+                        pass
+                return entry
+    return f"{getpass.getuser()}.dialer"
+
+
+def get_status():
+    config = load_sip_config()
+    running = is_service_running()
+    client = BaresipClient()
+
+    if not running:
+        return {
+            "service_active": False,
+            "registered": False,
+            "state": "offline",
+            "extension": config.get("extension", ""),
+            "server": config.get("server", ""),
+            "username": config.get("username", ""),
+            "calls_count": 0,
+            "active_call": None,
+        }
+
+    # Query reginfo
+    reg_resp = client.send_command("reginfo")
+    reg_data = reg_resp.get("data", "")
+    registered = ("200 OK" in reg_data or "OK" in reg_data or "code=200" in reg_data) and not (
+        "failed" in reg_data.lower() or "401" in reg_data or "403" in reg_data
+    )
+
+    # Query listcalls
+    calls_resp = client.send_command("listcalls")
+    calls_data = calls_resp.get("data", "")
+    calls_count = 0
+    state = "idle"
+    active_peer = None
+
+    if "Active calls (" in calls_data:
+        try:
+            count_str = calls_data.split("Active calls (")[1].split(")")[0]
+            calls_count = int(count_str)
+        except Exception:
+            calls_count = 0
+
+    if calls_count > 0:
+        state = "in_call"
+        for line in calls_data.splitlines():
+            line = line.strip()
+            if "sip:" in line:
+                active_peer = line
+
+    return {
+        "service_active": True,
+        "registered": registered,
+        "state": state,
+        "extension": config.get("extension", ""),
+        "server": config.get("server", ""),
+        "username": config.get("username", ""),
+        "calls_count": calls_count,
+        "active_call": active_peer,
+    }
+
+
+def list_audio_devices():
+    sinks_raw = subprocess.run(["pactl", "-f", "json", "list", "sinks"], capture_output=True, text=True).stdout
+    sources_raw = subprocess.run(["pactl", "-f", "json", "list", "sources"], capture_output=True, text=True).stdout
+    sinks = json.loads(sinks_raw) if sinks_raw else []
+    sources = json.loads(sources_raw) if sources_raw else []
+
+    config = load_sip_config()
+    sel_input = config.get("audio_input", "")
+    sel_output = config.get("audio_output", "")
+
+    outputs = []
+    for s in sinks:
+        name = s.get("name", "")
+        desc = s.get("description", name)
+        vol = s.get("volume", {}).get("front-left", {}).get("value_percent", "100%")
+        outputs.append({
+            "name": name,
+            "description": desc,
+            "volume": vol,
+            "is_default": s.get("state") == "RUNNING" or (name == sel_output)
+        })
+
+    inputs = []
+    for src in sources:
+        name = src.get("name", "")
+        if ".monitor" in name:
+            continue
+        desc = src.get("description", name)
+        vol = src.get("volume", {}).get("front-left", {}).get("value_percent", "80%")
+        inputs.append({
+            "name": name,
+            "description": desc,
+            "volume": vol,
+            "is_default": src.get("state") == "RUNNING" or (name == sel_input)
+        })
+
+    return {
+        "inputs": inputs,
+        "outputs": outputs,
+        "selected_input": sel_input or (inputs[0]["name"] if inputs else ""),
+        "selected_output": sel_output or (outputs[0]["name"] if outputs else ""),
+    }
+
+
+def cmd_devices(args):
+    devs = list_audio_devices()
+    print(json.dumps(devs, indent=2))
+    return 0
+
+
+def cmd_set_device(args):
+    config = load_sip_config()
+    client = BaresipClient()
+
+    if args.input:
+        config["audio_input"] = args.input
+        client.send_command("ausrc", f"pulse,{args.input}")
+    if args.output:
+        config["audio_output"] = args.output
+        client.send_command("auplay", f"pulse,{args.output}")
+
+    save_sip_config(config)
+    print("Updated audio device settings.")
+    return 0
+
+
+def cmd_test_audio(args):
+    sound_file = "/usr/share/sounds/alsa/Front_Center.wav"
+    if not os.path.exists(sound_file):
+        sound_file = "/usr/share/sounds/freedesktop/stereo/bell.oga"
+    
+    if os.path.exists(sound_file):
+        subprocess.Popen(["pw-play", sound_file])
+        print("Playing audio test chime...")
+        return 0
+    else:
+        print("No sound test file found", file=sys.stderr)
+        return 1
+
+
+def cmd_boost_mic(args):
+    target = args.volume if args.volume else "80%"
+    try:
+        subprocess.run(["pactl", "set-source-volume", "@DEFAULT_SOURCE@", str(target)], check=True)
+        print(f"Microphone volume set to {target}")
+        return 0
+    except Exception as e:
+        print(f"Error boosting mic: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_dial(args):
+    dest = args.number.strip()
+    if not dest:
+        print("Error: number required to dial", file=sys.stderr)
+        return 1
+
+    config = load_sip_config()
+    server = config.get("server", "")
+
+    if "@" not in dest:
+        if not server:
+            print("Error: No SIP server configured. Please configure ~/.config/omarchy/sip.json", file=sys.stderr)
+            return 1
+        uri = f"sip:{dest}@{server}"
+    elif not dest.startswith("sip:"):
+        uri = f"sip:{dest}"
+    else:
+        uri = dest
+
+    client = BaresipClient()
+    res = client.send_command("dial", uri)
+    if res.get("ok"):
+        print(f"Dialing {uri}...")
+        save_recent_call(dest)
+        return 0
+    else:
+        print(f"Failed to dial: {res.get('data') or res.get('error')}", file=sys.stderr)
+        return 1
+
+
+def cmd_hangup(args):
+    client = BaresipClient()
+    res = client.send_command("hangup")
+    if res.get("ok"):
+        print("Call terminated")
+        return 0
+    else:
+        print(f"Failed to hangup: {res.get('data') or res.get('error')}", file=sys.stderr)
+        return 1
+
+
+def cmd_answer(args):
+    client = BaresipClient()
+    res = client.send_command("accept")
+    if res.get("ok"):
+        print("Call answered")
+        return 0
+    else:
+        print(f"Failed to answer: {res.get('data') or res.get('error')}", file=sys.stderr)
+        return 1
+
+
+def cmd_dtmf(args):
+    digit = str(args.digit).strip()
+    if not digit:
+        return 1
+    client = BaresipClient()
+    res = client.send_command("sndcode", digit)
+    if not res.get("ok"):
+        res = client.send_command("in_band_dtmf_send", digit)
+    print(f"Sent DTMF {digit}: {res.get('ok')}")
+    return 0
+
+
+def cmd_toggle(args):
+    try:
+        plugin_id = get_dialer_plugin_id()
+        subprocess.run(["omarchy-shell", "shell", "toggle", plugin_id, "{}"], check=False)
+        return 0
+    except Exception as e:
+        print(f"Error toggling dialer panel: {e}", file=sys.stderr)
+        return 1
+
+
+RECENT_FILE = os.path.expanduser("~/.config/omarchy/sip_recents.json")
+
+def save_recent_call(number: str):
+    recents = load_recent_calls()
+    recents = [r for r in recents if r["number"] != number]
+    recents.insert(0, {"number": number, "timestamp": int(time.time())})
+    recents = recents[:20]
+    try:
+        with open(RECENT_FILE, "w", encoding="utf-8") as f:
+            json.dump(recents, f, indent=2)
+    except Exception:
+        pass
+
+
+def load_recent_calls():
+    if os.path.exists(RECENT_FILE):
+        try:
+            with open(RECENT_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+
+def cmd_recents(args):
+    recents = load_recent_calls()
+    print(json.dumps(recents, indent=2))
+    return 0
+
+
+def cmd_monitor(args):
+    print("Starting Omarchy Dialer event monitor...")
+    while True:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((DEFAULT_HOST, DEFAULT_PORT))
+                print("Connected to baresip event stream.")
+                buffer = b""
+                while True:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    msgs, buffer = decode_netstring(buffer)
+                    for m in msgs:
+                        try:
+                            ev = json.loads(m)
+                            if ev.get("event") is True:
+                                event_type = ev.get("type")
+                                peer = ev.get("peeruri", "Unknown")
+                                if event_type == "CALL_INCOMING":
+                                    caller = peer.replace("sip:", "").split("@")[0]
+                                    subprocess.run([
+                                        "omarchy-notification-send",
+                                        "--app-name", "Omarchy Phone",
+                                        "-g", "󰏲",
+                                        "-u", "critical",
+                                        "Incoming Call",
+                                        f"Incoming call from {caller}",
+                                        "--exec", "omarchy-dialer", "answer"
+                                    ], check=False)
+                                elif event_type == "CALL_CLOSED":
+                                    pass
+                        except Exception:
+                            pass
+        except Exception:
+            time.sleep(3)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Omarchy SIP Softphone & Dialer")
+    subparsers = parser.add_subparsers(dest="command")
+
+    # Status
+    p_status = subparsers.add_parser("status", help="Get SIP registration and call status")
+    p_status.add_argument("--json", action="store_true", default=True, help="Output JSON format")
+
+    # Devices
+    subparsers.add_parser("devices", help="List available audio input and output devices")
+
+    # Set device
+    p_setdev = subparsers.add_parser("set-device", help="Set active audio input/output device")
+    p_setdev.add_argument("--input", help="Input device (microphone) name")
+    p_setdev.add_argument("--output", help="Output device (speakers/headphones) name")
+
+    # Test audio
+    subparsers.add_parser("test-audio", help="Play test chime through selected output device")
+
+    # Boost mic
+    p_boost = subparsers.add_parser("boost-mic", help="Set microphone volume level (e.g. 80%%)")
+    p_boost.add_argument("volume", nargs="?", default="80%", help="Volume percentage (default 80%%)")
+
+    # Dial
+    p_dial = subparsers.add_parser("dial", aliases=["call"], help="Dial a number or extension")
+    p_dial.add_argument("number", help="Phone number or extension to call")
+
+    # Hangup
+    subparsers.add_parser("hangup", aliases=["end"], help="Hang up active call")
+
+    # Answer
+    subparsers.add_parser("answer", aliases=["accept"], help="Answer incoming call")
+
+    # DTMF
+    p_dtmf = subparsers.add_parser("dtmf", help="Send DTMF digit during call")
+    p_dtmf.add_argument("digit", help="Digit (0-9, *, #)")
+
+    # Toggle
+    subparsers.add_parser("toggle", help="Toggle dialer panel in Omarchy top bar")
+
+    # Recents
+    subparsers.add_parser("recents", help="List recent calls")
+
+    # Monitor
+    subparsers.add_parser("monitor", help="Run background incoming call event monitor")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        return cmd_toggle(args)
+
+    if args.command in ["status"]:
+        print(json.dumps(get_status(), indent=2))
+        return 0
+    elif args.command in ["devices"]:
+        return cmd_devices(args)
+    elif args.command in ["set-device"]:
+        return cmd_set_device(args)
+    elif args.command in ["test-audio"]:
+        return cmd_test_audio(args)
+    elif args.command in ["boost-mic"]:
+        return cmd_boost_mic(args)
+    elif args.command in ["dial", "call"]:
+        return cmd_dial(args)
+    elif args.command in ["hangup", "end"]:
+        return cmd_hangup(args)
+    elif args.command in ["answer", "accept"]:
+        return cmd_answer(args)
+    elif args.command in ["dtmf"]:
+        return cmd_dtmf(args)
+    elif args.command in ["toggle"]:
+        return cmd_toggle(args)
+    elif args.command in ["recents"]:
+        return cmd_recents(args)
+    elif args.command in ["monitor"]:
+        return cmd_monitor(args)
+    else:
+        parser.print_help()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

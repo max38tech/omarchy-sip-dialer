@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Phone / Dialer
+GenericName=SIP Softphone
+Comment=SIP dialer and softphone client for Omarchy
+Exec=omarchy-dialer toggle
+Icon=call-start
+Terminal=false
+Type=Application
+Categories=Network;Telephony;AudioVideo;
+Keywords=phone;dialer;sip;voip;call;
+StartupNotify=false

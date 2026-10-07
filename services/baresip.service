@@ -1,0 +1,13 @@
+[Unit]
+Description=Baresip SIP Daemon for Omarchy
+After=pipewire.service pipewire-pulse.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/baresip -f %h/.baresip
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

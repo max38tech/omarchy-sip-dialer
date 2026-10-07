@@ -1,0 +1,57 @@
+#
+# Baresip configuration for Omarchy
+#
+# SIP Network & Transport
+sip_listen		0.0.0.0:0
+sip_cafile		/etc/ssl/certs/ca-certificates.crt
+sip_capath		/etc/ssl/certs
+sip_tos			160
+
+# Call Parameters
+call_local_timeout	120
+call_max_calls		4
+call_hold_other_calls	yes
+call_accept		no
+
+# Audio Pipeline (PulseAudio driver routed through PipeWire)
+audio_player		pulse
+audio_source		pulse
+audio_alert		pulse
+ausrc_format		s16
+auplay_format		s16
+auenc_format		s16
+audec_format		s16
+audio_buffer		20-160
+audio_telev_pt		101
+
+# AVT / Jitter Buffer
+rtp_tos			184
+audio_jitter_buffer_type	fixed
+audio_jitter_buffer_ms	100-200
+audio_jitter_buffer_size	50
+
+# Modules Path
+module_path		/usr/lib/baresip/modules
+
+# Network Traversal Modules
+# CRITICAL: stun.so, turn.so, and ice.so MUST be loaded BEFORE account.so
+# If loaded after, baresip fails to parse 'medianat=stun' in account definitions.
+module			stun.so
+module			turn.so
+module			ice.so
+
+# Core Modules
+module			account.so
+module			contact.so
+module			menu.so
+module			ctrl_tcp.so
+ctrl_tcp_listen		127.0.0.1:4444
+
+# Audio Driver
+module			pulse.so
+
+# Codecs
+module			opus.so
+module			g711.so
+module			g722.so
+module			in_band_dtmf.so

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "{{USER_PLUGIN_ID}}",
+  "name": "Phone / Dialer",
+  "version": "1.0.0",
+  "author": "{{USER_NAME}}",
+  "description": "SIP softphone and dialer panel",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Phone / Dialer",
+    "description": "SIP softphone and dialer",
+    "category": "Communication",
+    "allowMultiple": false
+  }
+}
