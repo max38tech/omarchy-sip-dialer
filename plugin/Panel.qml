@@ -25,8 +25,14 @@ Panel {
   property int callSeconds: 0
   property var recentList: []
 
-  // Audio settings state
+  // Drawer states
   property bool showAudioSettings: false
+  property bool showLogs: false
+  property string logOutput: "Loading logs..."
+  property string lastMessage: ""
+  property bool isError: false
+
+  // Audio settings state
   property var audioInputs: []
   property var audioOutputs: []
   property string currentInput: ""
@@ -41,12 +47,14 @@ Panel {
     root.controller.show()
     refreshStatus()
     loadRecents()
-    loadAudioDevices()
+    if (showAudioSettings) loadAudioDevices()
+    if (showLogs) loadLogs()
   }
 
   function close() {
     root.controller.hide()
     root.showAudioSettings = false
+    root.showLogs = false
   }
 
   function toggle() {
@@ -124,6 +132,12 @@ Panel {
     }
   }
 
+  function loadLogs() {
+    if (!logsProcess.running) {
+      logsProcess.running = true
+    }
+  }
+
   function setAudioInput(name) {
     currentInput = name
     Quickshell.execDetached([root.dialerBin, "set-device", "--input", name])
@@ -148,7 +162,10 @@ Panel {
     interval: 2000
     running: root.opened || root.isInCall
     repeat: true
-    onTriggered: root.refreshStatus()
+    onTriggered: {
+      root.refreshStatus()
+      if (root.showLogs) root.loadLogs()
+    }
   }
 
   // Call duration timer
@@ -174,6 +191,8 @@ Panel {
           root.callState = data.state || "idle"
           root.extension = data.extension || ""
           root.server = data.server || ""
+          root.lastMessage = data.last_message || ""
+          root.isError = data.is_error === true
           if (data.active_call) {
             root.activeCall = data.active_call
           }
@@ -221,13 +240,27 @@ Panel {
     }
   }
 
+  // Logs worker process
+  Process {
+    id: logsProcess
+    running: false
+    command: [root.dialerBin, "logs", "-n", "50"]
+    stdout: StdioCollector {
+      id: logsOut
+      waitForEnd: true
+      onStreamFinished: function() {
+        root.logOutput = logsOut.text || "No logs available."
+      }
+    }
+  }
+
   KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
     bar: root.bar
     open: root.opened
-    contentWidth: Style.space(320)
+    contentWidth: Style.space(340)
     contentHeight: Style.space(520)
 
     ColumnLayout {
@@ -280,6 +313,22 @@ Panel {
           }
         }
 
+        // Logs Toggle Button
+        Button {
+          iconText: "📜"
+          text: ""
+          tooltipText: root.showLogs ? "Show Dialpad" : "SIP & Call Logs"
+          selected: root.showLogs
+          fontSize: Style.font.caption
+          onClicked: {
+            root.showLogs = !root.showLogs
+            if (root.showLogs) {
+              root.showAudioSettings = false
+              root.loadLogs()
+            }
+          }
+        }
+
         // Audio Settings Toggle Button
         Button {
           iconText: ""
@@ -289,7 +338,10 @@ Panel {
           fontSize: Style.font.caption
           onClicked: {
             root.showAudioSettings = !root.showAudioSettings
-            if (root.showAudioSettings) root.loadAudioDevices()
+            if (root.showAudioSettings) {
+              root.showLogs = false
+              root.loadAudioDevices()
+            }
           }
         }
 
@@ -299,7 +351,11 @@ Panel {
           text: ""
           tooltipText: "Refresh status"
           fontSize: Style.font.caption
-          onClicked: root.refreshStatus()
+          onClicked: {
+            root.refreshStatus()
+            if (root.showLogs) root.loadLogs()
+            if (root.showAudioSettings) root.loadAudioDevices()
+          }
         }
       }
 
@@ -478,13 +534,83 @@ Panel {
       }
 
       // ----------------------------------------------------
-      // VIEW B: STANDARD DIALPAD (When showAudioSettings is false)
+      // VIEW B: LOGS DRAWER (When showLogs is true)
       // ----------------------------------------------------
       ColumnLayout {
         Layout.fillWidth: true
         Layout.fillHeight: true
-        visible: !root.showAudioSettings
-        spacing: Style.space(10)
+        visible: root.showLogs
+        spacing: Style.space(8)
+
+        RowLayout {
+          Layout.fillWidth: true
+          Text {
+            text: "SIP & Engine Logs"
+            font.family: Style.font.family
+            font.pixelSize: Style.font.body
+            font.bold: true
+            color: Color.foreground
+            Layout.fillWidth: true
+          }
+
+          Button {
+            iconText: ""
+            text: "Refresh"
+            fontSize: Style.font.caption
+            onClicked: root.loadLogs()
+          }
+        }
+
+        Rectangle {
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          radius: Style.cornerRadius
+          color: Style.controlFill(false, false, Color.foreground, Color.accent)
+          border.width: 1
+          border.color: Color.popups.border
+
+          Flickable {
+            id: logFlick
+            anchors.fill: parent
+            anchors.margins: Style.space(6)
+            contentWidth: width
+            contentHeight: logText.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            flickableDirection: Flickable.VerticalFlick
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+            TextEdit {
+              id: logText
+              width: logFlick.width
+              text: root.logOutput
+              readOnly: true
+              selectByMouse: true
+              wrapMode: TextEdit.WrapAnywhere
+              font.family: "monospace"
+              font.pixelSize: Style.space(9)
+              color: Color.foreground
+            }
+          }
+        }
+
+        Button {
+          Layout.fillWidth: true
+          iconText: ""
+          text: "Back to Dialpad"
+          fontSize: Style.font.body
+          onClicked: root.showLogs = false
+        }
+      }
+
+      // ----------------------------------------------------
+      // VIEW C: STANDARD DIALPAD (When both drawers are false)
+      // ----------------------------------------------------
+      ColumnLayout {
+        Layout.fillWidth: true
+        Layout.fillHeight: true
+        visible: !root.showAudioSettings && !root.showLogs
+        spacing: Style.space(8)
 
         // Active Call Banner (if in call)
         Rectangle {
@@ -520,10 +646,56 @@ Panel {
           }
         }
 
+        // Call State / Error Notice Banner
+        Rectangle {
+          Layout.fillWidth: true
+          height: Style.space(34)
+          visible: !root.isInCall && root.lastMessage !== ""
+          radius: Style.cornerRadius
+          color: root.isError ? Qt.rgba(0.94, 0.27, 0.27, 0.15) : Qt.rgba(0.23, 0.51, 0.96, 0.15)
+          border.width: 1
+          border.color: root.isError ? "#ef4444" : "#3b82f6"
+
+          RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(8)
+            anchors.rightMargin: Style.space(8)
+            spacing: Style.space(6)
+
+            Text {
+              text: root.isError ? "⚠" : "ℹ"
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+              color: root.isError ? "#ef4444" : "#3b82f6"
+              font.bold: true
+            }
+
+            Text {
+              text: root.lastMessage
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              color: Color.foreground
+              Layout.fillWidth: true
+              elide: Text.ElideRight
+            }
+
+            Button {
+              text: "Logs"
+              iconText: "📜"
+              fontSize: Style.space(9)
+              onClicked: {
+                root.showLogs = true
+                root.showAudioSettings = false
+                root.loadLogs()
+              }
+            }
+          }
+        }
+
         // Number Display & Backspace Field
         Rectangle {
           Layout.fillWidth: true
-          height: Style.space(44)
+          height: Style.space(42)
           radius: Style.cornerRadius
           color: Style.controlFill(false, false, Color.foreground, Color.accent)
           border.width: 1
@@ -603,7 +775,7 @@ Panel {
 
             delegate: Rectangle {
               Layout.fillWidth: true
-              height: Style.space(48)
+              height: Style.space(46)
               radius: Style.cornerRadius
               color: padMouse.pressed ? Style.pressedFillFor(Color.foreground, Color.accent)
                     : (padMouse.containsMouse ? Style.hoverFillFor(Color.foreground, Color.accent) : "transparent")

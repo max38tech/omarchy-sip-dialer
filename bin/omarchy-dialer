@@ -2,11 +2,12 @@
 """
 Omarchy SIP Dialer & Control Bridge
 Manages the Baresip SIP engine, initiates/terminates calls, handles DTMF,
-bridges Quickshell and desktop notifications, and manages audio devices.
+bridges Quickshell and desktop notifications, manages audio devices, and fetches logs.
 """
 
 import sys
 import os
+import re
 import json
 import socket
 import time
@@ -15,6 +16,7 @@ import argparse
 import getpass
 
 CONFIG_PATH = os.path.expanduser("~/.config/omarchy/sip.json")
+CALL_STATE_FILE = os.path.expanduser("~/.config/omarchy/sip_call_state.json")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 4444
 
@@ -44,6 +46,25 @@ def save_sip_config(cfg):
             json.dump(cfg, f, indent=2)
     except Exception as e:
         print(f"Error saving sip config: {e}", file=sys.stderr)
+
+
+def load_call_state():
+    if os.path.exists(CALL_STATE_FILE):
+        try:
+            with open(CALL_STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_call_state(state):
+    try:
+        os.makedirs(os.path.dirname(CALL_STATE_FILE), exist_ok=True)
+        with open(CALL_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except Exception:
+        pass
 
 
 def encode_netstring(payload: str) -> bytes:
@@ -148,6 +169,13 @@ def get_status():
     running = is_service_running()
     client = BaresipClient()
 
+    call_state = load_call_state()
+    last_phase = call_state.get("phase", "")
+    last_msg = call_state.get("message", "")
+    last_ts = call_state.get("timestamp", 0)
+    # Display recent call event for up to 30 seconds
+    recent_event = last_msg if (time.time() - last_ts < 30) else ""
+
     if not running:
         return {
             "service_active": False,
@@ -158,6 +186,9 @@ def get_status():
             "username": config.get("username", ""),
             "calls_count": 0,
             "active_call": None,
+            "call_phase": "offline",
+            "last_message": "Service offline",
+            "is_error": True,
         }
 
     # Query reginfo
@@ -197,6 +228,9 @@ def get_status():
         "username": config.get("username", ""),
         "calls_count": calls_count,
         "active_call": active_peer,
+        "call_phase": last_phase if calls_count > 0 else ("ended" if recent_event else "idle"),
+        "last_message": recent_event,
+        "is_error": bool(call_state.get("error")) if recent_event else False,
     }
 
 
@@ -300,15 +334,26 @@ def cmd_dial(args):
     config = load_sip_config()
     server = config.get("server", "")
 
+    # Sanitize dialed number: strip unescaped whitespace, hyphens, dots, parentheses
     if "@" not in dest:
+        clean_number = re.sub(r'[\s\(\)\-\.]', '', dest)
         if not server:
             print("Error: No SIP server configured. Please configure ~/.config/omarchy/sip.json", file=sys.stderr)
             return 1
-        uri = f"sip:{dest}@{server}"
+        uri = f"sip:{clean_number}@{server}"
     elif not dest.startswith("sip:"):
-        uri = f"sip:{dest}"
+        clean_dest = dest.replace(" ", "")
+        uri = f"sip:{clean_dest}"
     else:
-        uri = dest
+        uri = dest.replace(" ", "")
+
+    save_call_state({
+        "phase": "dialing",
+        "dest": dest,
+        "message": f"Dialing {dest}...",
+        "timestamp": int(time.time()),
+        "error": None
+    })
 
     client = BaresipClient()
     res = client.send_command("dial", uri)
@@ -317,13 +362,28 @@ def cmd_dial(args):
         save_recent_call(dest)
         return 0
     else:
-        print(f"Failed to dial: {res.get('data') or res.get('error')}", file=sys.stderr)
+        err_msg = res.get('data') or res.get('error') or "Failed to dial"
+        save_call_state({
+            "phase": "error",
+            "dest": dest,
+            "message": f"Dial failed: {err_msg}",
+            "timestamp": int(time.time()),
+            "error": err_msg
+        })
+        print(f"Failed to dial: {err_msg}", file=sys.stderr)
         return 1
 
 
 def cmd_hangup(args):
     client = BaresipClient()
     res = client.send_command("hangup")
+    save_call_state({
+        "phase": "ended",
+        "dest": "",
+        "message": "Call terminated",
+        "timestamp": int(time.time()),
+        "error": None
+    })
     if res.get("ok"):
         print("Call terminated")
         return 0
@@ -337,6 +397,13 @@ def cmd_answer(args):
     res = client.send_command("accept")
     if res.get("ok"):
         print("Call answered")
+        save_call_state({
+            "phase": "established",
+            "dest": "",
+            "message": "Call connected",
+            "timestamp": int(time.time()),
+            "error": None
+        })
         return 0
     else:
         print(f"Failed to answer: {res.get('data') or res.get('error')}", file=sys.stderr)
@@ -362,6 +429,26 @@ def cmd_toggle(args):
         return 0
     except Exception as e:
         print(f"Error toggling dialer panel: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_logs(args):
+    lines = args.lines if hasattr(args, "lines") and args.lines else 50
+    try:
+        proc = subprocess.run(
+            ["journalctl", "--user", "-u", "baresip", "-n", str(lines), "--no-pager"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = proc.stdout
+        if getattr(args, "json", False):
+            print(json.dumps({"lines": output.splitlines(), "raw": output}, indent=2))
+        else:
+            print(output)
+        return 0
+    except Exception as e:
+        print(f"Error fetching logs: {e}", file=sys.stderr)
         return 1
 
 
@@ -415,8 +502,17 @@ def cmd_monitor(args):
                             if ev.get("event") is True:
                                 event_type = ev.get("type")
                                 peer = ev.get("peeruri", "Unknown")
+                                param = ev.get("param", "")
+
                                 if event_type == "CALL_INCOMING":
                                     caller = peer.replace("sip:", "").split("@")[0]
+                                    save_call_state({
+                                        "phase": "incoming",
+                                        "dest": caller,
+                                        "message": f"Incoming call from {caller}",
+                                        "timestamp": int(time.time()),
+                                        "error": None
+                                    })
                                     subprocess.run([
                                         "omarchy-notification-send",
                                         "--app-name", "Omarchy Phone",
@@ -426,8 +522,44 @@ def cmd_monitor(args):
                                         f"Incoming call from {caller}",
                                         "--exec", "omarchy-dialer", "answer"
                                     ], check=False)
-                                elif event_type == "CALL_CLOSED":
-                                    pass
+
+                                elif event_type in ["CALL_PROGRESS"]:
+                                    save_call_state({
+                                        "phase": "progress",
+                                        "dest": peer,
+                                        "message": "Connecting...",
+                                        "timestamp": int(time.time()),
+                                        "error": None
+                                    })
+
+                                elif event_type in ["CALL_RINGING"]:
+                                    save_call_state({
+                                        "phase": "ringing",
+                                        "dest": peer,
+                                        "message": "Ringing...",
+                                        "timestamp": int(time.time()),
+                                        "error": None
+                                    })
+
+                                elif event_type in ["CALL_ESTABLISHED"]:
+                                    save_call_state({
+                                        "phase": "established",
+                                        "dest": peer,
+                                        "message": "Call connected",
+                                        "timestamp": int(time.time()),
+                                        "error": None
+                                    })
+
+                                elif event_type in ["CALL_CLOSED"]:
+                                    reason = param or "Call terminated"
+                                    is_err = any(w in reason.lower() for w in ["required", "failed", "busy", "rejected", "40", "50", "timeout"])
+                                    save_call_state({
+                                        "phase": "closed",
+                                        "dest": peer,
+                                        "message": reason,
+                                        "timestamp": int(time.time()),
+                                        "error": reason if is_err else None
+                                    })
                         except Exception:
                             pass
         except Exception:
@@ -477,6 +609,11 @@ def main():
     # Recents
     subparsers.add_parser("recents", help="List recent calls")
 
+    # Logs
+    p_logs = subparsers.add_parser("logs", help="Get recent Baresip engine logs")
+    p_logs.add_argument("-n", "--lines", type=int, default=50, help="Number of log lines (default: 50)")
+    p_logs.add_argument("--json", action="store_true", help="Output JSON format")
+
     # Monitor
     subparsers.add_parser("monitor", help="Run background incoming call event monitor")
 
@@ -508,6 +645,8 @@ def main():
         return cmd_toggle(args)
     elif args.command in ["recents"]:
         return cmd_recents(args)
+    elif args.command in ["logs"]:
+        return cmd_logs(args)
     elif args.command in ["monitor"]:
         return cmd_monitor(args)
     else:

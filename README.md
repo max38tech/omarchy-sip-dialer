@@ -75,19 +75,19 @@ If you use AI coding assistants (e.g. Antigravity, Claude Code, Cursor, Codex):
 | **Dial Number via CLI** | `omarchy-dialer dial <number>` |
 | **Hangup via CLI** | `omarchy-dialer hangup` |
 | **Check Registration** | `omarchy-dialer status` |
+| **View Engine Logs** | `omarchy-dialer logs [-n 50]` |
 | **List Audio Devices** | `omarchy-dialer devices` |
 | **Switch Output Device** | `omarchy-dialer set-device --output "<device-name>"` |
 | **Switch Input Device** | `omarchy-dialer set-device --input "<device-name>"` |
 
 ---
 
-## Audio Devices Drawer
+## In-App Drawers: Audio & Live Logs
 
 Inside the dialer panel:
-1. Click the ** (Gear)** icon in the header to expand the Audio Drawer.
-2. Select your preferred Microphone and Output Headset/Speakers from the list.
-3. Click **󰕾 Test Audio** to verify playback.
-4. Click **󰍬 Boost Mic** to ensure sufficient input gain (sets 80% volume).
+- **📜 Live Logs Drawer**: Click the scroll icon in the header to view live Baresip SIP engine events, connection attempts, error reasons, and SDP negotiation. Includes a 1-click refresh button.
+- ** Audio Device Drawer**: Click the gear icon to switch microphones and speakers dynamically, test playback chime, and boost microphone volume to 80%.
+- **Step-by-Step Call State Banner**: Whenever a call fails (e.g. 404, busy, or truncated URI), an alert banner immediately shows the exact reason with a 1-click shortcut to view the logs.
 
 ---
 
