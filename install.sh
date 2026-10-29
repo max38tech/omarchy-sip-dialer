@@ -213,16 +213,21 @@ SHELL_JSON="$HOME/.config/omarchy/shell.json"
 if [ -f "$SHELL_JSON" ]; then
     if ! grep -q "$PLUGIN_ID" "$SHELL_JSON"; then
         echo "[*] Adding $PLUGIN_ID to Omarchy top bar (shell.json)..."
-        # Safely insert into layout.primary.right if jq is available
+        # Insert into bar.layout.right (entries are {"id": ...} objects) if jq is available
         if command -v jq >/dev/null 2>&1; then
-            jq --arg pid "$PLUGIN_ID" '
-                if .layout?.primary?.right then
-                    .layout.primary.right = ([$pid] + (.layout.primary.right | map(select(. != $pid))))
+            if jq --arg pid "$PLUGIN_ID" '
+                if .bar?.layout?.right then
+                    .bar.layout.right = ([{id: $pid}] + (.bar.layout.right | map(select(.id != $pid))))
                 else
-                    .
+                    error("no bar.layout.right in shell.json")
                 end
-            ' "$SHELL_JSON" > "${SHELL_JSON}.tmp" && mv "${SHELL_JSON}.tmp" "$SHELL_JSON"
-            echo "[+] Widget added to primary bar layout."
+            ' "$SHELL_JSON" > "${SHELL_JSON}.tmp"; then
+                mv "${SHELL_JSON}.tmp" "$SHELL_JSON"
+                echo "[+] Widget added to bar.layout.right."
+            else
+                rm -f "${SHELL_JSON}.tmp"
+                echo "[!] Could not add widget to shell.json; add {\"id\": \"$PLUGIN_ID\"} to bar.layout.right manually."
+            fi
         fi
     fi
 fi
