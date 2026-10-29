@@ -1,229 +1,123 @@
 ---
 name: omarchy-sip
 description: >
-  Install, configure, and maintain the native SIP softphone dialer, quicklaunch bar widget,
-  and audio manager for Omarchy Linux.
-  Use when the user wants to set up VoIP/SIP calling, phone dialer, softphone, baresip,
-  or manage SIP credentials and audio devices in Omarchy.
-  Triggers: SIP, VoIP, softphone, dialer, baresip, phone call, PBX, asterisk,
-  freepbx, audio device selector, phone dialpad.
+  Install, configure, troubleshoot, and remove the SIP softphone dialer for Omarchy Linux:
+  baresip engine, top-bar phone widget, dialer CLI, and keybinding.
+  Use when the user wants to set up VoIP/SIP calling, a phone dialer or softphone on Omarchy,
+  or to change SIP credentials, fix registration, or uninstall it.
+  Triggers: SIP, VoIP, softphone, dialer, baresip, phone call, PBX, asterisk, freepbx,
+  phone dialpad, omarchy-dialer.
 ---
 
-# Omarchy SIP Softphone & Dialer Skill
+# Omarchy SIP Dialer Skill
 
-This skill provides complete instructions for autonomous AI agents to set up, configure, and troubleshoot the native SIP softphone client, Quickshell top-bar widget, and PipeWire audio manager on Omarchy Linux.
+This skill installs and maintains the dialer by running the repository's own scripts.
+`install.sh` does all the work. This file covers how to drive it, what it needs from the
+user, and how to check that it worked. Do not rebuild its steps by hand.
 
----
-
-## 1. MANDATORY INTERACTIVE DISCOVERY (DO THIS FIRST)
-
-> [!IMPORTANT]
-> **NEVER generate dummy credentials or proceed with installation without user input.**
-> Before executing ANY installation commands or writing configuration files, you **MUST** prompt the user for their SIP account and PBX details:
-
-Ask the user for:
-1. **SIP Server / Hostname**: The PBX or SIP provider domain or IP (e.g., `pbx.example.com`, `192.168.1.100`).
-2. **SIP Extension**: The user's internal extension number (e.g., `10`, `1001`).
-3. **SIP Username / Auth ID**: Authentication ID (often `ext-account` or matching extension).
-4. **SIP Password / Secret**: SIP secret for registration.
-5. **STUN Server** *(Optional)*: Recommended for NAT traversal. Usually `<server>:3478` or `stun.l.google.com:19302`.
-6. **Transport & Port** *(Optional)*: UDP, TCP, or TLS (default: UDP port 5060).
+Work from the repository root, the directory that contains `install.sh`.
 
 ---
 
-## 2. CRITICAL TECHNICAL ARCHITECTURE & GOTCHAS
+## 1. Collect the SIP details first
 
-When setting up or debugging baresip on Omarchy, keep these proven lessons in mind:
+Do not run anything until the user has given you these values. Never invent credentials.
 
-### A. Module Load Order (NAT / Two-Way Audio Silence)
-- In `~/.baresip/config`, `stun.so`, `turn.so`, and `ice.so` **MUST** be loaded **BEFORE** `account.so`.
-- If loaded after `account.so`, baresip logs `account: medianat not found: 'stun'`, ignores STUN, and places private LAN IPs (`192.168.x.x`) into the SDP session. This causes **total silence (0 bit/s RX)** because the remote RTP media cannot traverse NAT.
+| Value | Flag | Required | Default |
+| :--- | :--- | :--- | :--- |
+| PBX / SIP server host or IP | `--server` | yes | none |
+| Extension | `--extension` | no | `10` |
+| Auth username | `--username` | no | the extension |
+| Password | `--password` | yes | none |
+| Transport: udp, tcp, or tls | `--transport` | no | `udp` |
+| Port | `--port` | no | `5060` |
+| STUN server, host:port | `--stun` | no | `<server>:3478` |
 
-### B. Omarchy Plugin Namespace Rule
-- Omarchy's plugin validator (`omarchy-plugin-validate`) **forbids** user plugins from using the `omarchy.*` ID namespace.
-- You **MUST** use `<username>.dialer` (e.g. `user.dialer`) or a custom prefix like `custom.dialer`.
+Ask for the server, extension, username, password, and transport. Offer the STUN default.
+If the user's PBX gives the port, ask for it too.
 
-### C. PipeWire & Audio Device Naming
-- Baresip uses the `pulse` audio driver to route through PipeWire.
-- Never pass `pulse,default` to `/ausrc` or `/auplay`; pass either `pulse` (omitting device to use current default) or the full ALSA node name (e.g. `pulse,alsa_output.pci-0000_00_1f.3.analog-stereo`).
+Two constraints to tell the user about:
+- Passwords and other values cannot contain spaces, `;`, `<`, `>`, or double quotes. The
+  installer rejects them.
+- `--password` puts the secret in the shell history and the process list. If the user
+  cares, have them run the installer themselves and type the password at the prompt.
 
 ---
 
-## 3. STEP-BY-STEP IMPLEMENTATION PROCEDURE
+## 2. Run the installer
 
-Once the user provides credentials, perform the following steps:
+Non-interactive, with the values the user gave:
 
-### Step 1: Install System Packages
-Ensure packages are installed via pacman:
 ```bash
-sudo pacman -S --needed baresip libpulse pipewire wireplumber jq python
+./install.sh --non-interactive \
+  --server pbx.example.com \
+  --extension 10 \
+  --username 10-12345 \
+  --password 'THEIR_PASSWORD' \
+  --transport tcp
 ```
 
-### Step 2: Configure Baresip Engine
-Create `~/.baresip/config`:
-```text
-sip_listen          0.0.0.0:0
-sip_cafile          /etc/ssl/certs/ca-certificates.crt
-sip_capath          /etc/ssl/certs
-sip_tos             160
+Add `--stun host:port` only if the user gave one. Otherwise the installer uses `<server>:3478`.
 
-call_local_timeout  120
-call_max_calls      4
-call_hold_other_calls yes
-call_accept         no
+What the installer does, so you can explain it:
+1. Installs missing packages with `sudo pacman` (`baresip`, `libpulse`, `jq`, `python`).
+2. Installs the `omarchy-dialer` CLI to `~/.local/bin/` and writes the baresip config to `~/.baresip/`.
+3. Writes `~/.config/omarchy/sip.json` and the widget to `~/.config/omarchy/plugins/<user>.dialer/`.
+4. Enables and restarts the `baresip` and `omarchy-dialer-monitor` user services.
+5. Places the widget in the top bar with `omarchy-plugin-enable`, and adds `SUPER + ALT + P` to `~/.config/hypr/bindings.lua`.
+6. Waits up to 20 seconds for PBX registration and reports the result.
 
-audio_player        pulse
-audio_source        pulse
-audio_alert         pulse
-ausrc_format        s16
-auplay_format       s16
-auenc_format        s16
-audec_format        s16
-audio_buffer        20-160
-audio_telev_pt      101
+It is safe to run again. It updates the settings and keeps the audio devices the user chose.
 
-rtp_tos             184
-audio_jitter_buffer_type    fixed
-audio_jitter_buffer_ms      100-200
-audio_jitter_buffer_size    50
+### sudo needs a real terminal
 
-module_path         /usr/lib/baresip/modules
+The `sudo pacman` step asks for the user's password. You cannot type it, and this session
+has no terminal for it. If `baresip` is missing, the installer fails with
+`sudo: a terminal is required`. Do not ask the user for their sudo password. Tell them to run
+this in their own terminal, outside the agent session:
 
-# CRITICAL: STUN loaded before account.so
-module              stun.so
-module              turn.so
-module              ice.so
-
-module              account.so
-module              contact.so
-module              menu.so
-module              ctrl_tcp.so
-ctrl_tcp_listen     127.0.0.1:4444
-
-module              pulse.so
-
-module              opus.so
-module              g711.so
-module              g722.so
-module              in_band_dtmf.so
-```
-
-Create `~/.baresip/accounts` (chmod 600):
-```text
-<sip:USERNAME@SERVER:PORT;transport=TRANSPORT>;auth_user=USERNAME;auth_pass=PASSWORD;regint=60;medianat=stun;stunserver="stun:STUN_SERVER";natpinhole=yes;dtmfmode=rtpevent
-```
-*(If STUN is not used, omit `medianat`, `stunserver`, and `natpinhole`).*
-
-### Step 3: Write Metadata File
-Save `~/.config/omarchy/sip.json` (chmod 600) with:
-```json
-{
-  "extension": "<EXT>",
-  "username": "<USERNAME>",
-  "server": "<SERVER>",
-  "port": 5060,
-  "transport": "udp",
-  "stun_server": "<STUN_SERVER>",
-  "audio_input": "",
-  "audio_output": ""
-}
-```
-
-### Step 4: Install omarchy-dialer CLI Bridge
-Deploy the Python control bridge to `~/.local/bin/omarchy-dialer` and ensure it is executable (`chmod +x`).
-
-Test command:
 ```bash
-omarchy-dialer devices
+sudo pacman -S --needed baresip libpulse
 ```
 
-### Step 5: Install Quickshell Bar Widget & Panel
-Create `~/.config/omarchy/plugins/<username>.dialer/` containing:
-- `manifest.json`:
-  ```json
-  {
-    "schemaVersion": 1,
-    "id": "<username>.dialer",
-    "name": "Phone / Dialer",
-    "version": "1.0.0",
-    "author": "<username>",
-    "description": "SIP softphone and dialer panel",
-    "kinds": ["bar-widget"],
-    "entryPoints": {
-      "barWidget": "BarWidget.qml"
-    },
-    "barWidget": {
-      "displayName": "Phone / Dialer",
-      "description": "SIP softphone and dialer",
-      "category": "Communication",
-      "allowMultiple": false
-    }
-  }
-  ```
-- `BarWidget.qml`: Status bar icon (`󰏲`) with active call badge and tooltip.
-- `Panel.qml`: 3x4 dialpad, live call timer, call/end buttons, recent calls, and collapsible ` Audio` device drawer.
-
-### Step 6: Enable Background Services
-Deploy user systemd service units:
-- `~/.config/systemd/user/baresip.service`:
-  ```ini
-  [Unit]
-  Description=Baresip SIP Daemon for Omarchy
-  After=pipewire.service pipewire-pulse.service network-online.target
-  Wants=network-online.target
-
-  [Service]
-  Type=simple
-  ExecStart=/usr/bin/baresip -f %h/.baresip
-  Restart=always
-  RestartSec=3
-
-  [Install]
-  WantedBy=default.target
-  ```
-
-- `~/.config/systemd/user/omarchy-dialer-monitor.service`:
-  ```ini
-  [Unit]
-  Description=Omarchy SIP Dialer Incoming Call Monitor
-  After=baresip.service
-  Wants=baresip.service
-
-  [Service]
-  Type=simple
-  ExecStart=%h/.local/bin/omarchy-dialer monitor
-  Restart=always
-  RestartSec=3
-
-  [Install]
-  WantedBy=default.target
-  ```
-
-Reload and start:
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now baresip.service omarchy-dialer-monitor.service
-```
-
-### Step 7: Add to Status Bar & Keybindings
-1. Edit `~/.config/omarchy/shell.json` to insert `"<username>.dialer"` into `layout.primary.right`.
-2. Add Hyprland keybinding to `~/.config/hypr/bindings.lua`:
-   ```lua
-   { "SUPER ALT", "P", "omarchy-dialer toggle", "SIP Softphone Dialer" },
-   ```
-3. Create `~/.local/share/applications/omarchy-dialer.desktop` for application launchers.
-4. Refresh Omarchy bar:
-   ```bash
-   omarchy-shell shell restart
-   ```
+Once it finishes, run the installer again. It skips packages that are already installed.
 
 ---
 
-## 4. VERIFICATION & VALIDATION
+## 3. Verify
 
-Verify that the dialer is operating properly:
-1. **Check Registration**: Run `omarchy-dialer status`. Output should show `"registered": true` and `"state": "idle"`.
-2. **Check Audio Devices**: Run `omarchy-dialer devices`. Output should list all PipeWire input and output devices.
-3. **Test Sound**: Run `omarchy-dialer test-audio` to play a test chime through the speakers.
-4. **Test Outbound Call**: Run `omarchy-dialer dial <number>`.
-5. **Verify Audio Statistics**: In baresip logs (`journalctl --user -u baresip -n 30`), check that RTP transmission (`RX` and `TX`) shows active bitrates (e.g., `RX = 64.0 / TX = 64.0 kbit/s`), confirming full two-way NAT traversal.
+Run these and report the actual output:
+
+1. `~/.local/bin/omarchy-dialer status`: expect `"registered": true` and `"state": "idle"`.
+2. If registration is false, read the log with `journalctl --user -u baresip.service -n 50 --no-pager`.
+   Common causes are a wrong password, wrong transport or port, or a server that is unreachable from the network.
+3. `hyprctl binds | grep "SIP Softphone"`: the keybinding is loaded.
+4. `jq '.bar.layout.right' ~/.config/omarchy/shell.json`: the list includes `<user>.dialer`.
+
+The top-bar icon appears right after install. If it does not, have the user log out and back in.
+
+Test a call only with the user's agreement. `omarchy-dialer dial <number>` places a real call.
+
+---
+
+## 4. Troubleshooting
+
+- **Registered but no two-way audio (0 bit/s RX):** baresip loaded `account.so` before the
+  NAT modules. The shipped `config/baresip.config.template` has the correct order
+  (`stun.so`, `turn.so`, `ice.so` before `account.so`). If someone edited it, restore that order.
+- **Widget missing from the bar:** run `omarchy-shell shell rescanPlugins`, then
+  `omarchy-plugin-enable <user>.dialer right --index 0`. If that fails, run `omarchy-restart-shell`.
+- **Plugin ID rule:** Omarchy rejects plugin IDs in the `omarchy.*` namespace. The installer uses `<user>.dialer`. Keep it that way.
+- **Audio device names:** baresip uses the `pulse` driver. Do not pass `pulse,default`
+  to `/ausrc` or `/auplay`. Use `pulse` alone, or the full PipeWire node name. The in-app
+  Audio drawer and `omarchy-dialer set-device` handle this.
+
+---
+
+## 5. Uninstall
+
+```bash
+./uninstall.sh
+```
+
+It asks whether to delete the SIP settings. It leaves the pacman packages installed.
